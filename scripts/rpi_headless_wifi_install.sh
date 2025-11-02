@@ -12,12 +12,15 @@ check_os_version () {
     fi
 
     local _version=""
-    if [ -f /etc/os-release ]; then
-        _version=$(grep -oP 'VERSION="\K[^"]+' /etc/os-release)
-    fi
-    if [ "$_version" != "11 (bullseye)" ]; then
-        echo "ERROR: Distribution not based on Raspbian 11 (bullyeye)."
-        exit 1
+    _id=$(grep -oP '^ID=\"?\K[^"]+' /etc/os-release)
+    _version=$(grep -oP '^VERSION_ID=\"?\K[^"]+' /etc/os-release)
+    if [ "$_id" = "debian" ] || [ "$_id" = "raspbian" ]; then
+        case "$_version" in
+            11|12|13) ;;  # bullseye, bookworm, trixie
+            *) echo "ERROR: Unsupported Debian version $_version"; exit 1 ;;
+        esac
+    else
+        echo "ERROR: Unsupported distribution $_id"; exit 1
     fi
 }
 
@@ -55,6 +58,8 @@ install_network_manager () {
     #echo "Installing NetworkManager..."
     #apt-get install -y network-manager
     #apt-get clean
+    echo "Downloading and installing DNSMasq..."
+    apt-get install -y dnsmasq-base
 }
 
 # This only works on Linux raspberry 11 (bullseye) 

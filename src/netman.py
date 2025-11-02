@@ -189,21 +189,25 @@ def connect_to_AP(conn_type=None, conn_name=GENERIC_CONNECTION_NAME, \
         return False
 
     try:
+        wifi_if = None
+        for dev in NetworkManager.NetworkManager.GetDevices():
+            if dev.DeviceType == NetworkManager.NM_DEVICE_TYPE_WIFI:
+                wifi_if = dev.Interface
+                break
         # This is the hotspot that we turn on, on the RPI so we can show our
         # captured portal to let the user select an AP and provide credentials.
         hotspot_dict = {
-            '802-11-wireless': {'band': 'bg',
-                                'mode': 'ap',
-                                'ssid': ssid},
-            'connection': {'autoconnect': False,
-                           'id': conn_name,
-                           'interface-name': 'wlan0',
-                           'type': '802-11-wireless',
-                           'uuid': str(uuid.uuid4())},
-            'ipv4': {'address-data': 
-                        [{'address': '192.168.42.1', 'prefix': 24}],
-                     'addresses': [['192.168.42.1', 24, '0.0.0.0']],
-                     'method': 'manual'},
+            '802-11-wireless': {'band': 'bg', 'mode': 'ap', 'ssid': ssid},
+            'connection': {
+                'autoconnect': False,
+                'id': conn_name,
+                'interface-name': wifi_if,
+                'type': '802-11-wireless',
+                'uuid': str(uuid.uuid4())
+            },
+            'ipv4': {'address-data': [{'address': '192.168.42.1', 'prefix': 24}],
+                    'addresses': [['192.168.42.1', 24, '0.0.0.0']],
+                    'method': 'manual'},
             'ipv6': {'method': 'auto'}
         }
 
