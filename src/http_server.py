@@ -2,7 +2,7 @@
 
 import os, getopt, sys, json, atexit
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from io import BytesIO
 
 # Local modules
@@ -50,69 +50,56 @@ def RequestHandlerClassFactory(address, ssids, rcode):
 
         # See if this is a specific request, otherwise let the server handle it.
         def do_GET(self):
-
             print(f'do_GET {self.path}')
+            parsed = urlparse(self.path)
+            path = parsed.path  # <-- ignore ?query
 
-            # Handle the hotspot starting and a computer connecting to it,
-            # we have to return a redirect to the gateway to get the 
-            # captured portal to show up.
-            if '/hotspot-detect.html' == self.path:
-                self.send_response(301) # redirect
+            # Captive portal redirects
+            if path in ('/hotspot-detect.html', '/generate_204'):
+                self.send_response(302)  # temporary redirect
                 new_path = f'http://{self.address}/'
                 print(f'redirecting to {new_path}')
                 self.send_header('Location', new_path)
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                self.send_header('Pragma', 'no-cache')
+                self.send_header('Expires', '0')
                 self.end_headers()
-
-            if '/generate_204' == self.path:
-                self.send_response(301) # redirect
-                new_path = f'http://{self.address}/'
-                print(f'redirecting to {new_path}')
-                self.send_header('Location', new_path)
-                self.end_headers()
-
-            # Handle a REST API request to return the device registration code
-            if '/regcode' == self.path:
-                self.send_response(200)
-                self.end_headers()
-                response = BytesIO()
-                response.write(self.rcode.encode('utf-8'))
-                print(f'GET {self.path} returning: {response.getvalue()}')
-                self.wfile.write(response.getvalue())
                 return
 
-            # Handle a REST API request to return the list of SSIDs
-            if '/networks' == self.path:
+            # Registration code
+            if path == '/regcode':
                 self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                self.send_header('Pragma', 'no-cache')
+                self.send_header('Expires', '0')
                 self.end_headers()
-                response = BytesIO()
-                ssids = self.ssids # passed in to the class factory
-                """ map whatever we get from net man to our constants:
-                Security:
-                    NONE         
-                    HIDDEN         
-                    WEP         
-                    WPA        
-                    WPA2      
-                    ENTERPRISE
-                Required user input (from UI form):
-                    NONE                   - No input requried.
-                    HIDDEN, WEP, WPA, WPA2 - Need password.
-                    ENTERPRISE             - Need username and password.
-                """
-                response.write(json.dumps(ssids).encode('utf-8'))
-                print(f'GET {self.path} returning: {response.getvalue()}')
-                self.wfile.write(response.getvalue())
+                payload = self.rcode.encode('utf-8')
+                print(f'GET {path} returning: {payload}')
+                self.wfile.write(payload)
                 return
 
-            # Not sure if this is just OSX hitting the captured portal,
-            # but we need to exit if we get it.
-            if '/bag' == self.path:
+            # Wi-Fi scan (alias /network -> /networks)
+            if path in ('/networks', '/network'):
+                current = netman.get_list_of_access_points()  # rescan each time
+                self.ssids = current                          # keep in sync if used elsewhere
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                self.send_header('Pragma', 'no-cache')
+                self.send_header('Expires', '0')
+                self.end_headers()
+                payload = json.dumps(current).encode('utf-8')
+                print(f'GET {path} returning: {payload}')
+                self.wfile.write(payload)
+                return
+
+            # Optional kill switch some OSs hit during captive portal flows
+            if path == '/bag':
                 sys.exit()
 
-            # All other requests are handled by the server which vends files 
-            # from the ui_path we were initialized with.
-            super().do_GET()
-
+            # Otherwise, serve static files from UI directory
+            return super().do_GET()
 
         # test with: curl localhost:5000 -d "{'name':'value'}"
         def do_POST(self):
