@@ -142,7 +142,7 @@ def get_list_of_access_points():
                 continue
 
             # Don't add other PFC's to the list!
-            if ap.Ssid.startswith('Rpi-'+os.uname()[1]):
+            if ap.Ssid.startswith('DexScreen-Setup'):
                 continue
 
             ssids.append(entry)
@@ -157,7 +157,7 @@ def get_list_of_access_points():
 #------------------------------------------------------------------------------
 # Get hotspot SSID name.
 def get_hotspot_SSID():
-    return 'Rpi-'+os.uname()[1]
+    return 'DexScreen-Setup'
 
 
 #------------------------------------------------------------------------------

@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# NM dispatcher: flip to Hotspot when Wi-Fi is really offline; launch/stop portal; honor onboarding lock.
+
+# Be tolerant: keep -u for safety, avoid -e/pipefail so benign non-zero exits (grep miss, etc.) don’t kill the hook.
+set -u
+
+# -------- resolve tools safely --------
+NMCLI="$(command -v nmcli)"      || exit 0
+IPBIN="$(command -v ip)"         || exit 0
+PING="$(command -v ping)"        || exit 0
+AWK="$(command -v awk)"          || exit 0
+GREP="$(command -v grep)"        || exit 0
+SED="$(command -v sed)"          || exit 0
+HEAD="$(command -v head)"        || exit 0
+PGREP="$(command -v pgrep)"      || exit 0
+PKILL="$(command -v pkill)"      || exit 0
+HOSTNAME_BIN="$(command -v hostname)" || exit 0
+LOGGER="$(command -v logger || echo true)"
+DATE="$(command -v date || echo date)"
+STAT="$(command -v stat || echo stat)"    # GNU stat on Debian supports -c %Y
+
+# -------- logging --------
+LOG=/var/log/wifi-fallback.log
+exec >>"$LOG" 2>&1
+$LOGGER -t wifi-fallback "DEVICE=${1:-} ACTION=${2:-} start"
+echo "---- $($DATE) DEVICE=${1:-} ACTION=${2:-} ----"
+
+# -------- app/portal paths --------
+RUN_SH="/home/pi/rpi_wifi_connect/scripts/run.sh"
+UI="/home/pi/rpi_wifi_connect/ui"
+
+# -------- onboarding lock (created by portal on /connect) --------
+LOCK="/run/wifi-onboarding.lock"   # presence = onboarding in progress
+LOCK_MAX_AGE=120                   # seconds we’ll honor a lock before treating it as stale
+
+# -------- helpers --------
+device_state() {
+  # returns nmcli device state for the wifi iface: disconnected|connecting|connected|...
+  "$NMCLI" -t -f DEVICE,STATE device status | "$AWK" -F: -v d="$WIFI_IF" '$1==d{print $2}'
+}
+
+connecting_via_wifi() {
+  case "$(device_state)" in
+    connecting|preparing|config|need-auth) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wifi_if() { "$NMCLI" -t -f DEVICE,TYPE device status | "$AWK" -F: '$2=="wifi"{print $1; exit}'; }
+
+ap_ip() {
+  "$NMCLI" -g IP4.ADDRESS device show "$WIFI_IF" 2>/dev/null | "$SED" 's#/.*##' | "$HEAD" -n1 \
+  || "$IPBIN" -4 addr show "$WIFI_IF" | "$SED" -n 's/.*inet \([0-9.]\+\)\/.*/\1/p' | "$HEAD" -n1
+}
+
+ap_active() {
+  while IFS= read -r name; do
+    mode="$(nmcli -g 802-11-wireless.mode connection show "$name" 2>/dev/null || true)"
+    [ "$mode" = "ap" ] && return 0
+  done < <(nmcli -t -f NAME,TYPE con show --active | awk -F: '$2=="wifi"{print $1}')
+  return 1
+}
+
+ensure_hotspot() {
+  "$NMCLI" -t -f NAME connection show | "$GREP" -qx Hotspot || \
+    "$NMCLI" connection add type wifi ifname "$WIFI_IF" con-name Hotspot autoconnect no ssid "rpi-$("$HOSTNAME_BIN")"
+  "$NMCLI" connection modify Hotspot \
+    802-11-wireless.mode ap 802-11-wireless.band bg \
+    ipv4.method shared \
+    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.proto rsn \
+    802-11-wireless-security.group ccmp \
+    802-11-wireless-security.pairwise ccmp \
+    802-11-wireless-security.auth-alg open
+  #"$NMCLI" connection modify Hotspot 802-11-wireless-security.psk ""
+}
+
+start_portal() {
+  # Don’t start twice
+  if "$PGREP" -f "$RUN_SH" >/dev/null 2>&1 || "$PGREP" -f "http_server.py" >/dev/null 2>&1; then
+    echo "portal already running"
+    return
+  fi
+  
+  # Wait briefly for the AP IP to be assigned
+  local AP_IP=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do AP_IP="$(ap_ip)"; [ -n "$AP_IP" ] && break; sleep 0.5; done
+  [ -n "$AP_IP" ] || { echo "no AP IP; skip portal start"; return; }
+
+  echo "starting portal on $AP_IP:80"
+  # Make venv see Debian NM bindings (safe with set -u)
+  export PYTHONPATH="/usr/lib/python3/dist-packages:${PYTHONPATH:-}"
+
+  /usr/bin/env bash -c "exec $RUN_SH -a '$AP_IP' -p 80 -u '$UI'" \
+    >/var/log/wifi-portal.log 2>&1 & disown
+}
+
+stop_portal() {
+  "$PKILL" -f "$RUN_SH" >/dev/null 2>&1 || true
+  "$PKILL" -f "http_server.py" >/dev/null 2>&1 || true
+}
+
+bring_up_hotspot() {
+  ensure_hotspot
+  "$NMCLI" device disconnect "$WIFI_IF" >/dev/null 2>&1 || true
+  "$NMCLI" -t -f NAME con show --active | "$GREP" -qx Hotspot || "$NMCLI" connection up Hotspot >/dev/null 2>&1 || true
+  start_portal
+}
+
+bring_down_hotspot() {
+  stop_portal
+  "$NMCLI" -t -f NAME con show --active | "$GREP" -qx Hotspot && "$NMCLI" connection down Hotspot >/dev/null 2>&1 || true
+}
+
+client_active() { "$NMCLI" -t -f TYPE,DEVICE con show --active | "$GREP" -q "^wifi:$WIFI_IF$"; }
+
+online_via_wifi() {
+  local dev gw
+  dev="$("$IPBIN" route | "$AWK" '/^default/{print $5; exit}')"
+  gw="$("$IPBIN" route | "$AWK" '/^default/{print $3; exit}')"
+  [ "$dev" = "$WIFI_IF" ] || [ "$dev" = "$P2P_IF" ] || { echo "default not via $WIFI_IF (dev=$dev)"; return 1; }
+  [ -n "$gw" ] || { echo "no default gw"; return 1; }
+  "$PING" -I "$WIFI_IF" -c1 -W1 "$gw" >/dev/null 2>&1 || { echo "gw down"; return 1; }
+  "$PING" -I "$WIFI_IF" -c1 -W1 1.1.1.1 >/dev/null 2>&1 || { echo "ext unreachable"; return 1; }
+  return 0
+}
+
+lock_active() {
+  [ -f "$LOCK" ] || return 1
+  local now mtime age
+  now="$($DATE +%s)"
+  mtime="$($STAT -c %Y "$LOCK" 2>/dev/null || echo "$now")"
+  age=$(( now - mtime ))
+  echo "onboarding lock age=${age}s"
+  [ "$age" -lt "$LOCK_MAX_AGE" ]
+}
+
+# -------- main decision --------
+WIFI_IF="$(wifi_if)"; [ -n "$WIFI_IF" ] || { echo "no wifi if"; exit 0; }
+P2P_IF="p2p-dev-$WIFI_IF"
+
+# react to wlan0, its p2p shim, or empty DEVICE
+if [ -n "${1:-}" ] && [ "${1:-}" != "$WIFI_IF" ] && [ "${1:-}" != "p2p-dev-$WIFI_IF" ]; then
+  echo "ignore ${1:-}"; exit 0;
+fi
+
+case "${2:-}" in
+  up|down|carrier|dhcp4-change|dhcp6-change|pre-down|connectivity-change)
+    # If client is already active OR we truly have internet, keep hotspot down.
+    if ap_active; then
+      if online_via_wifi; then
+        echo "internet back -> down hotspot"
+        bring_down_hotspot
+      else
+        echo "hotspot already up -> no-op"
+      fi
+      exit 0
+    fi
+
+    if client_active || online_via_wifi; then
+      echo "client/online -> down hotspot"
+      bring_down_hotspot
+      exit 0
+    fi
+
+    # If NM is in the middle of connecting, don't bring AP back yet.
+    if connecting_via_wifi; then
+      echo "wifi state=$(device_state) -> hold hotspot"
+      exit 0
+    fi
+
+    # If onboarding lock is fresh, don't bring AP back yet.
+    if lock_active; then
+      echo "onboarding lock active -> skipping hotspot"
+      exit 0
+    fi
+
+    # Still offline and no valid hold -> ensure hotspot is up.
+    echo "offline -> up hotspot"
+    bring_up_hotspot
+    ;;
+  *)
+    echo "ignore action: ${2:-}"
+    ;;
+esac

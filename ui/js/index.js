@@ -10,7 +10,7 @@ $(function () {
         // Optional sentinel for hidden SSIDs
         $select.append(
             $('<option>')
-                .text('Hidden network…')
+                .text('Hidden network')
                 .attr('value', '') // empty value lets server use hidden-ssid field
                 .attr('data-security', 'HIDDEN')
         );

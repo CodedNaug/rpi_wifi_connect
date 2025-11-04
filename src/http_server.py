@@ -1,6 +1,6 @@
 # Our main wifi-connect application, which is based around an HTTP server.
 
-import os, getopt, sys, json, atexit
+import os, getopt, sys, json, atexit, time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from io import BytesIO
@@ -13,6 +13,8 @@ import dnsmasq
 ADDRESS = '192.168.42.1'
 PORT = 80
 UI_PATH = '../ui'
+LOCKFILE = "/run/wifi-onboarding.lock"
+LOCK_HOLD_SECS = 20
 
 
 #------------------------------------------------------------------------------
@@ -149,6 +151,13 @@ def RequestHandlerClassFactory(address, ssids, rcode):
                         conn_type = netman.CONN_TYPE_SEC_PASSWORD
                     break
 
+            try:
+                # create/update lock so the dispatcher doesn't bring Hotspot back
+                with open(LOCKFILE, "w") as _f:
+                    _f.write(str(int(time.time())) + "\n")
+            except Exception as e:
+                print(f"warn: could not create lockfile {LOCKFILE}: {e}")
+
             # Stop the hotspot
             netman.stop_hotspot()
 
@@ -164,11 +173,20 @@ def RequestHandlerClassFactory(address, ssids, rcode):
 
             # Handle success or failure of the new connection
             if success:
-                print(f'Connected!  Exiting app.')
+                # give NM a moment to settle default route/DNS so the dispatcher sees "online"
+                time.sleep(LOCK_HOLD_SECS)
+                try:
+                    os.remove(LOCKFILE)
+                except FileNotFoundError:
+                    pass
+                print('Connected!  Exiting app.')
                 sys.exit()
             else:
-                print(f'Connection failed, restarting the hotspot.')
-
+                try:
+                    os.remove(LOCKFILE)
+                except FileNotFoundError:
+                    pass
+                print('Connection failed, restarting the hotspot.')
                 # Update the list of SSIDs since we are not connected
                 self.ssids = netman.get_list_of_access_points()
 
